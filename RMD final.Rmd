@@ -1,0 +1,595 @@
+---
+title: "Purchase_Prediction_Random_Forest"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message=FALSE}
+# Install required packages
+
+# install.packages("tidyverse")
+# install.packages("scales")
+# install.packages("caret")
+# install.packages("devtools")
+# library(devtools)  
+# install.packages('FSelector', dependencies = T)
+# install.packages('C50', dependencies = T)
+# install.packages("e1071")
+# install.packages("h2o", dependencies = T)
+# install.packages("Metrics")
+# install.packages("randomForest")
+# install.packages("randomForestSRC")
+# install.packages("ROSE")
+# install.packages("pROC")
+# install.packages("gridExtra")
+# install.packages("party")
+# install.packages("ggpubr")
+# #install.packages('mltools')
+# #install.packages('data.table')
+
+library(tidyverse)
+library(scales)
+library(caret)
+library(FSelector)
+library(C50)
+library(e1071)
+library(h2o)
+library(Metrics)
+library(randomForest)
+library(randomForestSRC)
+library(ROSE) 
+library(pROC)
+library(gridExtra)
+library(party)
+library(ggpubr)
+library(mltools)
+library(data.table)
+
+```
+
+## Data Understanding
+
+### Dictionary
+
+Variable | Description
+------------- | -------------
+ID            | Customer identification number
+Gender        | Gender of the customer
+Age           | Age of the customer (in years)
+Dependent     | Whether the customer has a dependent or not (1 = yes, 0 = no)
+Marital_Status| Marital state (1=married, 2=single, 0 = others)
+Region_Code   | Code of the region for the customer
+Years_at_Residence| The duration in the current residence (in years)
+Occupation    | Occupation type of the customer
+Channel_Code  | Acquisition channel code used to reach the customer when they opened their bank account 
+Vintage       | The duration that the customer has been associated with the company (in months)
+Credit_Product| If the customer has any active credit product (home loan, personal loan, credit card etc.)
+Avg_Account_Balance| Average account balance for the customer in last 12 months
+Account_Type  | Account type of the customer with categories Silver, Gold and Platinum
+Active        | If the customer is active in last 3 months
+Registration  | Whether the customer has visited the bank for the offered product registration (1 = yes, 0 = no)
+Target        | Whether the customer has purchased the product (0= Customer did not purchase the product, 1= Customer purchased the product)
+
+
+### Understanding the data type and distribution from customer's data
+```{r read input data, echo=FALSE}
+# Import input data
+
+lead.dt <- read.csv('assignment_data.csv', stringsAsFactors = TRUE)
+str(lead.dt)
+summary(lead.dt)
+```
+### Understanding data and find incorrect data for categorical data
+```{r Find missing value, uncommon data for categorical data, echo=FALSE}
+# Understanding data and find incorrect data for categorical data
+
+arrange(count(lead.dt, Gender), desc(n))
+arrange(count(lead.dt, Dependent), desc(n)) # Found an error (Dependent = -1 118 observations)
+arrange(count(lead.dt, Marital_Status), desc(n)) 
+arrange(count(lead.dt, Region_Code), desc(n))
+arrange(count(lead.dt, Occupation), desc(n))
+arrange(count(lead.dt, Channel_Code), desc(n)) 
+arrange(count(lead.dt, Credit_Product), desc(n)) # Found missing value (NA = 18268 observations). 
+arrange(count(lead.dt, Account_Type), desc(n))
+arrange(count(lead.dt, Active), desc(n))
+arrange(count(lead.dt, Registration), desc(n))
+arrange(count(lead.dt, Target), desc(n))
+```
+
+### Plot numerical data
+```{r Ploting numerical data, echo=FALSE, fig.height=5, fig.width=10}
+# Ploting numerical data
+
+grid.arrange(
+ggplot(lead.dt)+
+  geom_histogram(aes(x=Age), binwidth = 1)+
+  labs(y="Number of records", title="Histogram of Numerical Data with outliers line") + geom_vline(xintercept = mean(lead.dt$Age)+ 3*sd(lead.dt$Age), linetype=3) + geom_vline(xintercept = mean(lead.dt$Age)- 3*sd(lead.dt$Age), linetype=3),
+ggplot(lead.dt)+
+  geom_histogram(aes(x=Years_at_Residence), binwidth =  1)+
+  labs(y="Number of records", title="") + geom_vline(xintercept = mean(lead.dt$Years_at_Residence)+ 3*sd(lead.dt$Years_at_Residence), linetype=3) + geom_vline(xintercept = mean(lead.dt$Years_at_Residence)- 3*sd(lead.dt$Years_at_Residence), linetype=3),
+
+ggplot(lead.dt)+
+  geom_histogram(aes(x=Vintage), binwidth = 4)+
+  labs(y="Number of records") + geom_vline(xintercept = mean(lead.dt$Vintage)+ 3*sd(lead.dt$Vintage), linetype=3 ) + geom_vline(xintercept = mean(lead.dt$Vintage)- 3*sd(lead.dt$Vintage), linetype=3),
+ggplot(lead.dt)+
+  geom_histogram(aes(x=Avg_Account_Balance), bins = 10000)+
+  labs(y="Number of records", x="Average Account Balance") + scale_x_continuous(labels = label_comma()) + geom_vline( xintercept = mean(lead.dt$Avg_Account_Balance)+ 3*sd(lead.dt$Avg_Account_Balance), linetype=3 ) + geom_vline( xintercept = mean(lead.dt$Avg_Account_Balance)- 3*sd(lead.dt$Avg_Account_Balance), linetype=3 ),
+nrow=2)
+
+# Found extreme outlier in average account balance
+```
+
+## Data Preparation
+
+### Perform data cleaning
+```{r Data Cleaning}
+
+# Check duplicate data
+sum(duplicated(lead.dt$ID))
+```
+
+```{r}
+# Set data type from numerical to categorical
+columns <- c('Gender', 'Dependent', 'Marital_Status', 'Region_Code', 'Occupation', 'Channel_Code', 'Credit_Product', 'Account_Type', 'Active', 'Registration', 'Target')
+lead.dt[columns] <- lapply(lead.dt[columns], as.factor)
+```
+
+```{r}
+# Fix level for Account_Type
+lead.dt$Account_Type <- factor(lead.dt$Account_Type, levels = c("Silver", "Gold", "Platinum"))
+```
+
+```{r}
+# Remove ID, 
+lead.dt <- select(lead.dt, -ID)
+
+# Remove incorrect Dependent
+lead.dt <- lead.dt[!lead.dt$Dependent==-1, ]
+```
+
+```{r}
+# Credit_Product > Due to the number of missing value is significant number (8.30%), we decide to keep these observations and treat missing value as NO (not having active credit product).
+index_Credit_Product <- which(is.na(lead.dt$Credit_Product))  
+lead.dt$Credit_Product[index_Credit_Product] = "No"
+```
+
+### Calculate entropy and Information gain
+```{r Calculate entropy of Target}
+# Create function to compute entropy
+entropy <- function(target) {
+  freq <- table(target)/length(target)
+  vec <- as.data.frame(freq)[,2]
+  vec<-vec[vec>0]
+  -sum(vec * log2(vec))
+}
+entropy(lead.dt$Target)
+```
+
+```{r Calculate information gains , fig.height=5, fig.width=10}
+#Calculate Information Gain for each feature
+weights <- information.gain(Target~., lead.dt)
+weights$attr  <- rownames(weights)
+weights <- arrange(weights, -attr_importance)
+barplot(weights$attr_importance, names = weights$attr, las = 2, ylim = c(0, 0.15))
+
+# Remove feature Information Gain = 0, 
+lead.dt <- select(lead.dt, -Years_at_Residence)
+```
+
+### Plot the relation between top information gain features on target
+```{r Features plot, echo=FALSE, fig.height=7, fig.width=10}
+# Recode Target and Registration variables
+lead <- lead.dt
+lead$Target <- recode(lead$Target, "0" = "No", "1" = "Yes")
+lead$Registration <- recode(lead$Registration, "0" = "No", "1" = "Yes")
+
+# Create individual plots
+registration_plot <- ggplot(lead, aes(x = Target, group = Registration)) +
+  geom_bar(aes(y = after_stat(prop), fill = factor(after_stat(x))), width = 0.5, stat = "count", alpha = 0.7) +
+  geom_text(aes(label = scales::percent(after_stat(prop)), y = after_stat(prop)), stat = "count", vjust = -0.1) +
+  labs(y = "Percentage") +
+  facet_grid(~Registration) +
+  scale_fill_manual("Target", values = c("steelblue", "orange"), labels = c("No", "Yes")) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position = "none") +
+  ggtitle("Registration")
+
+channel_code_plot <- ggplot(lead, aes(x = Target, group = Channel_Code)) +
+  geom_bar(aes(y = after_stat(prop), fill = factor(after_stat(x))), stat = "count", alpha = 0.7) +
+  geom_text(aes(label = scales::percent(after_stat(prop)), y = after_stat(prop)), stat = "count", vjust = -0.1) +
+  labs(y = "Percentage") +
+  facet_grid(~Channel_Code) +
+  scale_fill_manual("Target", values = c("steelblue", "orange"), labels = c("No", "Yes")) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position = "none") +
+  ggtitle("Channel Code")
+
+occupation_plot <- ggplot(lead, aes(x = Target, group = Occupation)) +
+  geom_bar(aes(y = after_stat(prop), fill = factor(after_stat(x))), stat = "count", alpha = 0.7) +
+  geom_text(aes(label = scales::percent(after_stat(prop)), y = after_stat(prop)), stat = "count", vjust = -0.1) +
+  labs(y = "Percentage") +
+  facet_grid(~Occupation) +
+  scale_fill_manual("Target", values = c("steelblue", "orange"), labels = c("No", "Yes")) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position = "none") +
+  ggtitle("Occupation")
+
+credit_product_plot <- ggplot(lead, aes(x = Target, group = Credit_Product)) +
+  geom_bar(aes(y = after_stat(prop), fill = factor(after_stat(x))), width = 0.5, stat = "count", alpha = 0.7) +
+  geom_text(aes(label = scales::percent(after_stat(prop)), y = after_stat(prop)), stat = "count", vjust = -0.1) +
+  labs(y = "Percentage") +
+  facet_grid(~Credit_Product) +
+  scale_fill_manual("Target", values = c("steelblue", "orange"), labels = c("No", "Yes")) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position = "none") +
+  ggtitle("Credit Product")
+
+# Combine plots and add legend
+combined_plots <- ggarrange(registration_plot, channel_code_plot, occupation_plot, credit_product_plot, 
+                            nrow = 2,ncol = 2)
+print(combined_plots)
+
+```
+
+```{r Features plot 2, echo=FALSE, fig.height=6, fig.width=10}
+# Create individual plots for Age and Vintage
+ggarrange(
+ ggplot(lead, aes(x = Age)) + 
+  geom_histogram(aes(color = Target, fill = Target), alpha = 0.7, position = "identity")+
+  scale_color_manual(values=c("#386cb0","black"))+
+  scale_fill_manual(values=c("#386cb0","#fdb315"))+
+  theme_classic() + labs(y = "Number of people"),
+ ggplot(lead, aes(x = Vintage)) + 
+  geom_histogram(aes(color = Target, fill = Target), alpha = 0.7, position = "identity")+
+  scale_color_manual(values=c("#386cb0","black"))+
+  scale_fill_manual(values=c("#386cb0","#fdb315"))+
+  theme_classic() + labs(y = "Number of people"), ncol=1,common.legend=T)
+```
+
+### Data Partitioning
+```{r Data Partitioning}
+# Data Partitioning 70:30
+
+set.seed(20)
+index = createDataPartition(lead.dt$Target, p = 0.7, list = FALSE)
+# Generate training and test data
+training = lead.dt[index,]
+test = lead.dt[-index,]
+```
+
+## Modeling
+
+### Feature Selection
+```{r Feature Selection}
+# Create new training data for each scenarios
+training.5fts <-  training[c("Registration", "Age", "Channel_Code", "Vintage", "Occupation", "Target")]
+```
+
+#### 5 features from highest information gain
+```{r Comparing number of features - 5}
+#Random Forest - 5 features
+set.seed(20)
+model_5ft <- randomForest(Target~. , training.5fts)
+```
+
+```{r echo=FALSE, eval=FALSE}
+print(model_5ft)
+importance(model_5ft)
+varImpPlot(model_5ft)
+```
+
+```{r}
+# Predict on Test Data
+model_pred <- predict(model_5ft, test)
+confusionMatrix(model_pred, test$Target, positive='1', mode = "prec_recall")
+#Accuracy : 0.9054       #Precision : 0.77102
+#Recall :  0.51119       #F1 : 0.61478
+```
+
+### Imbalanced Handling
+```{r Adjust Imbalanced Data}
+# Perform over sampling, under sampling, both over and under sampling to adjust data imbalanced
+train_5fts_both_smpl <- ovun.sample(Target ~ . , data = training.5fts, method = "both", p= 0.5, seed=20)$data
+train_5fts_over_smpl <- ovun.sample(Target ~ . , data = training.5fts, method = "over", p= 0.5, seed=20)$data
+train_5fts_undr_smpl <- ovun.sample(Target ~ . , data = training.5fts, method = "under", p= 0.5, seed=20)$data
+```
+
+#### Both Sampling
+```{r Perform Random Forest without remove outlier}
+# Random Forest Model 1 - Both Sampling
+set.seed(20)
+model_5ft_both_smpl <- randomForest(Target~. , train_5fts_both_smpl)
+```
+
+```{r echo=FALSE, eval=FALSE}
+print(model_5ft_both_smpl)
+importance(model_5ft_both_smpl)
+varImpPlot(model_5ft_both_smpl)
+```
+
+```{r}
+# Predict on Test Data
+model_both_pred <- predict(model_5ft_both_smpl, test)
+confusionMatrix(model_both_pred, test$Target, positive='1', mode = "prec_recall")
+#Accuracy : 0.8239      #Precision : 0.4420
+#Recall : 0.7322        #F1 : 0.5512
+```
+
+#### Over Sampling
+```{r}
+#Random Forest Model 2 - Over Sampling
+set.seed(20)
+model_5ft_over_smpl <- randomForest(Target~. , train_5fts_over_smpl)
+```
+
+```{r echo=FALSE, eval=FALSE}
+print(model_5ft_over_smpl)
+importance(model_5ft_over_smpl)
+varImpPlot(model_5ft_over_smpl)
+```
+
+```{r}
+# Predict on Test Data
+model_over_pred <- predict(model_5ft_over_smpl, test)
+confusionMatrix(model_over_pred, test$Target, positive='1', mode = "prec_recall")
+#Accuracy : 0.8241      #Precision : 0.4422
+#Recall : 0.7318        #F1 : 0.5513
+```
+
+#### Under Sampling
+```{r}
+#Random Forest Model 3 - Under Sampling
+set.seed(20)
+model_5ft_under_smpl <- randomForest(Target~. , train_5fts_undr_smpl)
+```
+
+```{r echo=FALSE, eval=FALSE}
+print(model_5ft_under_smpl)
+importance(model_5ft_under_smpl)
+varImpPlot(model_5ft_under_smpl)
+```
+
+```{r}
+# Predict on Test Data
+model_undr_pred <- predict(model_5ft_under_smpl, test)
+confusionMatrix(model_undr_pred, test$Target, positive='1', mode = "prec_recall")
+#Accuracy : 0.8233      #Precision : 0.4410
+#Recall : 0.7335        #F1 : 0.5508
+```
+
+#### No Sampling
+```{r}
+#Random Forest Model 4 - No sampling
+set.seed(20)
+model_5ft_no_smpl <- randomForest(Target~. , training.5fts)
+
+# Predict on Test Data
+model_nosmpl_pred <- predict(model_5ft_no_smpl, test)
+confusionMatrix(model_pred, test$Target, positive='1', mode = "prec_recall")
+#Accuracy : 0.9054       #Precision : 0.77102
+#Recall :  0.51119       #F1 : 0.61478
+```
+
+```{r}
+# After comparing the results between 4 datasets, we decide to use both over and under sampling to build the model
+```
+
+### Outlier
+```{r Perform Random Forest by removing outlier}
+# Remove outlier from numerical data, 
+# only average_account_balance that have outlier over 3 Z-Score
+Z_upper_balance <-  mean(lead.dt$Avg_Account_Balance)+ 3*sd(lead.dt$Avg_Account_Balance)
+training_rm_out <- training %>% filter(Avg_Account_Balance <= Z_upper_balance)
+training_5ft_rm_out <-  training_rm_out[c("Registration", "Age", "Channel_Code", "Vintage", "Occupation", "Target")]
+
+# Create both sampling on removed outlier training data
+training_5ft_rm_out_bothsmpl <- ovun.sample(Target ~ . , data = training_5ft_rm_out, method = "both", p= 0.5, seed=20)$data
+
+# Create new data = results
+results <- test
+```
+
+```{r}
+# Training model for the dataset without outlier
+set.seed(20)
+model_5fts_rm <- randomForest(Target~. , training_5ft_rm_out_bothsmpl)
+```
+
+```{r echo=FALSE, eval=FALSE}
+print(model_5fts_rm)
+importance(model_5fts_rm)
+varImpPlot(model_5fts_rm)
+```
+
+```{r}
+# Predict on Test Data
+model_both_pred_rm <- predict(model_5fts_rm, test)
+results$PredictionRF_rm <-  model_both_pred_rm
+
+confusionMatrix(model_both_pred_rm, test$Target, positive='1', mode = "prec_recall") # Model without outlier
+#Accuracy : 0.8227       #Precision : 0.4398
+#Recall : 0.7323         #F1 : 0.5496
+```
+
+### Model Tuning
+
+#### Parameter tuning on the data with outlier
+```{r Parameter Tuning - not removed outliers}
+# Model Tuning for data with outlier
+
+# Random Forest Tuning 500 ntree (Default)
+set.seed(20)
+
+tuned_rf <- randomForestSRC::tune(Target~., train_5fts_both_smpl,
+  mtryStart = sqrt(ncol(train_5fts_both_smpl)),
+  nodesizeTry = seq(1, 10, by = 1),
+  ntree = 500,
+  stepFactor = 1.25, improve = 0.001)
+
+# View the results to see the best hyperparameters
+tuned_rf$optimal
+
+#recommended parameter
+#nodesize = 1
+#mtry = 5
+```
+
+#### Model tuning on the data without outlier
+```{r Parameter Tuning - removed outliers}
+# Model Tuning for data without outlier
+
+# Random Forest Tuning 500 ntree (Default)
+set.seed(20)
+
+tuned_rf2 <- randomForestSRC::tune(Target~., training_5ft_rm_out_bothsmpl,
+  mtryStart = sqrt(ncol(training_5ft_rm_out_bothsmpl)),
+  nodesizeTry = seq(1, 10, by = 1),
+  ntree = 500,
+  stepFactor = 1.25, improve = 0.001)
+
+# View the results to see the best hyperparameters
+tuned_rf2$optimal
+
+#recommended parameter
+#nodesize = 1
+#mtry = 3
+```
+
+#### Build model on the data with outlier using recommended parameter 
+```{r Perform Random Forest without remove outlier - After Tuning}
+set.seed(20)
+
+model_5fts_tuned <- randomForest(Target~. , train_5fts_both_smpl, ntree=500, mtry = 5, nodesize = 1)
+```
+
+```{r echo=FALSE, eval=FALSE}
+print(model_5fts_tuned)
+importance(model_5fts_tuned)
+varImpPlot(model_5fts_tuned)
+```
+
+```{r}
+# Predict on Test Data
+model_both_pred_tuned <- predict(model_5fts_tuned, test)
+results$PredictionRF_tuned <-  model_both_pred_tuned
+
+confusionMatrix(model_both_pred_tuned, test$Target, positive='1', mode = "prec_recall") # Tuned Model with outlier
+#Accuracy : 0.7979       #Precision : 0.3939
+#Recall : 0.6831         #F1 : 0.4996
+```
+
+#### Build model on the data without outlier using recommended parameter
+```{r Perform Random Forest with remove outlier - After Tuning}
+set.seed(20)
+
+model_5fts_rm_tuned <- randomForest(Target~. , training_5ft_rm_out_bothsmpl, ntree=500, mtry = 3, nodesize = 1)
+```
+
+```{r echo=FALSE, eval=FALSE}
+print(model_5fts_rm_tuned)
+importance(model_5fts_rm_tuned)
+varImpPlot(model_5fts_rm_tuned)
+```
+
+```{r}
+# Predict on Test Data
+model_both_pred_rm_tuned <- predict(model_5fts_rm_tuned, test)
+results$PredictionRF_rm_tuned <-  model_both_pred_rm_tuned
+
+confusionMatrix(model_both_pred_rm_tuned, test$Target, positive='1', mode = "prec_recall") # Tuned model without outlier
+#Accuracy :  0.8167      #Precision : 0.4275
+#Recall : 0.7111         #F1 : 0.5340
+```
+
+## Evaluation
+
+### Create confusion matrix
+```{r Evaluation}
+# Create confusion metrix of our selected model
+confusionMatrix(model_both_pred, test$Target, positive='1', mode = "prec_recall")
+#Accuracy : 0.8239      #Precision : 0.4420
+#Recall : 0.7322        #F1 : 0.5512
+```
+
+```{r}
+# Testing on Training data (without balancing) to check overfitting
+model_both_pred_training <- predict(model_5ft_both_smpl, training)
+confusionMatrix(model_both_pred_training, training$Target, positive='1', mode = "prec_recall") # Test on training data
+#Accuracy :  0.8294      #Precision : 0.4532
+#Recall : 0.7523         #F1 : 0.5656
+```
+
+### ROC Chart
+```{r ROC Charts, message=FALSE, echo=FALSE}
+# Create ROC charts
+model_pred <- predict(model_5ft, test, type = "prob") # 5 features - imbalanced - #1
+ROC_model_1 <- roc(test$Target, model_pred[,2])
+
+model_oversmpl_pred <- predict(model_5ft_over_smpl, test, type = "prob") # 5 features - over sampling - #2
+ROC_model_2 <- roc(test$Target, model_oversmpl_pred[,2])
+
+model_undrsmpl_pred <- predict(model_5ft_under_smpl, test, type = "prob") # 5 features - under sampling - #3
+ROC_model_3 <- roc(test$Target, model_undrsmpl_pred[,2])
+
+model_bthsmpl_pred <- predict(model_5ft_both_smpl, test, type = "prob") # 5 features - both sampling - #4
+ROC_model_4 <- roc(test$Target, model_bthsmpl_pred[,2])
+
+model_bthsmpl_rmoutl_pred <- predict(model_5fts_rm, test, type = "prob") # 5 features - both sampling - removed outlier - #5
+ROC_model_5 <- roc(test$Target, model_bthsmpl_rmoutl_pred[,2])
+
+model_bthsmpl_tuned_pred <- predict(model_5fts_tuned, test, type = "prob") # 5 features - both sampling - Tuned - #6
+ROC_model_6 <- roc(test$Target, model_bthsmpl_tuned_pred[,2])
+
+model_bthsmpl_rmoutl_tuned_pred <- predict(model_5fts_rm_tuned, test, type = "prob") ## 5 features - both sampling - Tuned - removed outlier - #7
+ROC_model_7 <- roc(test$Target, model_bthsmpl_rmoutl_tuned_pred[,2])
+```
+
+#### ROC chart compare all models
+```{r ROC chart compare all models, fig.height=5, fig.width=10}
+# Plot the ROC curves # compare all models
+pROC::ggroc(list(
+  NO.1_5features = ROC_model_1,
+  NO.2_5features_over_sampling = ROC_model_2,
+  NO.3_5features_under_sampling = ROC_model_3,
+  NO.5_5features_remove_outlier = ROC_model_5,
+  NO.6_5features_tuned = ROC_model_6,
+  NO.7_5features_remove_outlier_tuned = ROC_model_7,
+  NO.4_5features_both_sampling = ROC_model_4), legacy.axes=TRUE, alpha=0.7) + scale_color_manual(values=c("#d9d9d9", "#bdbdbd","#737373",  "#bdbdbd","#737373" ,"#252525",  "#d73027"), name = "Model") + xlab("FPR") + ylab("TPR") +
+   geom_abline(intercept = 0, slope = 1, color = "darkgrey", linetype = "dashed")
+```
+
+#### ROC chart compare imbalance handling techniques
+```{r ROC chart compare sampling techniques, fig.height=5, fig.width=10}
+# Plot the ROC curves # compare all models
+pROC::ggroc(list(
+  NO.1_5features = ROC_model_1,
+  NO.2_5features_over_sampling = ROC_model_2,
+  NO.3_5features_under_sampling = ROC_model_3,
+  NO.4_5features_both_sampling = ROC_model_4), legacy.axes=TRUE, alpha=0.7) + scale_color_manual(values=c("#bdbdbd","#737373" ,"#252525",  "#d73027"), name = "Model") + xlab("FPR") + ylab("TPR") +
+   geom_abline(intercept = 0, slope = 1, color = "darkgrey", linetype = "dashed")
+```
+
+#### ROC chart compare outlier and parameter tuning
+```{r ROC chart compare outlier and parameter tuning, fig.height=5, fig.width=10}
+# Plot the ROC curves # compare outlier & tuning
+pROC::ggroc(list(
+  RF_5features_remove_outlier = ROC_model_5,
+  RF_5features_tuned = ROC_model_6,
+  RF_5features_remove_outlier_tuned = ROC_model_7,
+  RF_5features_both_sampling = ROC_model_4), legacy.axes=TRUE, alpha=0.7) + scale_color_manual(values=c("#252525","#bababa", "#737373", "#d73027"), name = "Model") + xlab("FPR") + ylab("TPR") +
+   geom_abline(intercept = 0, slope = 1, color = "darkgrey", linetype = "dashed")
+```
+
+```{r Area under ROC curve, eval=TRUE, echo=FALSE}
+#Calculate the area under the curve (AUC) for Random Forest 
+pROC::auc(ROC_model_1)
+pROC::auc(ROC_model_2)
+pROC::auc(ROC_model_3)
+pROC::auc(ROC_model_4)
+pROC::auc(ROC_model_5)
+pROC::auc(ROC_model_6)
+pROC::auc(ROC_model_7)
+```
